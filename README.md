@@ -53,6 +53,15 @@ You can use Auth0, Okta, Azure Entra ID, Keycloak, etc.
 - Allow your local IP or use a secure network path.
 - Copy the connection string.
 
+If Atlas connectivity fails in your environment (for example TLS handshake/proxy issues), you can run a local MongoDB instead:
+
+- Start local MongoDB with Docker Compose:
+   - `docker compose up -d mongo`
+- Use one of these `MONGODB_URI` values in `.env`:
+   - App on host (`npm run dev`): `mongodb://127.0.0.1:27017/zen_sandbox?directConnection=true`
+   - App in compose (`docker compose up -d --build`): `mongodb://mongo:27017/zen_sandbox?directConnection=true`
+- Keep `MONGODB_DB=zen_sandbox` and `MONGODB_COLLECTION=sandbox_states`.
+
 ### 3) Fill `.env`
 
 Required values:
