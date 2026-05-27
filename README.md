@@ -24,6 +24,21 @@ This app now runs through `server.js` so it can use SSO and MongoDB APIs.
     - `docker run --env-file .env -p 8000:8000 zen-sandbox`
 4. Open `http://localhost:8000`.
 
+## Push-Ready Workflow (GCP Artifact Registry)
+
+Use this when you are ready to push the image for admin/cloud deployment.
+
+1. Confirm image builds locally:
+   - `docker build -t zen-sandbox:push-ready .`
+2. Open the downloaded push tool folder (the one with `push.py`).
+3. Run push command with absolute paths:
+   - `python .\push.py --name "panhathai-zen-sandbox" --root_path "C:\Users\Asus\Downloads\Zen Sandbox" --dockerfile "C:\Users\Asus\Downloads\Zen Sandbox\Dockerfile"`
+4. If push fails with `uploadArtifacts` permission error, ask admin to grant Artifact Registry writer access for the provided service account.
+
+Notes:
+- `.env` is excluded from Docker build context by `.dockerignore`, so secrets are not baked into the image.
+- For deployed runtime, set environment variables on the cloud service (especially `BASE_URL`, `OIDC_REDIRECT_URI`, and `EXPRESS_TRUST_PROXY=true`).
+
 ### Docker Compose
 
 - Start:
@@ -80,6 +95,7 @@ Optional values:
 - `MONGODB_DB` (default `zen_sandbox`)
 - `MONGODB_COLLECTION` (default `sandbox_states`)
 - `MONGODB_RETRY_MS` (default `30000`) - retry interval when MongoDB is temporarily unavailable
+- `EXPRESS_TRUST_PROXY` (default `false`) - set `true` or `1` when deployed behind a reverse proxy/load balancer so request IP handling is correct
 
 If MongoDB is temporarily unreachable, the web app still starts and retries the DB connection in the background.
 

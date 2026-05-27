@@ -1532,9 +1532,11 @@ function updateAuthButtons() {
   const authenticated = Boolean(authUser);
   if (loginBtn) {
     loginBtn.disabled = authenticated;
+    loginBtn.hidden = authenticated;
   }
   if (logoutBtn) {
     logoutBtn.disabled = !authenticated;
+    logoutBtn.hidden = !authenticated;
   }
   if (saveStateBtn) {
     saveStateBtn.disabled = !authenticated;
@@ -1565,10 +1567,20 @@ async function apiFetch(path, options = {}) {
     const message = payload && payload.message ? payload.message : `Request failed (${response.status})`;
     const error = new Error(message);
     error.status = response.status;
+    error.details = Array.isArray(payload && payload.details) ? payload.details : [];
     throw error;
   }
 
   return payload;
+}
+
+function formatApiError(error) {
+  const details = Array.isArray(error && error.details) ? error.details.filter(Boolean) : [];
+  if (details.length === 0) {
+    return error.message;
+  }
+
+  return `${error.message} (${details.join("; ")})`;
 }
 
 function bytesToBase64(bytes) {
@@ -1718,7 +1730,7 @@ async function saveStateToCloud() {
     });
     setStatus(`Saved to MongoDB at ${new Date(result.savedAt).toLocaleTimeString()}`);
   } catch (error) {
-    setStatus(`Save failed: ${error.message}`, true);
+    setStatus(`Save failed: ${formatApiError(error)}`, true);
   } finally {
     updateAuthButtons();
   }
@@ -1737,7 +1749,7 @@ async function loadStateFromCloud() {
     applyCloudStatePayload(payload);
     setStatus("Loaded state from MongoDB");
   } catch (error) {
-    setStatus(`Load failed: ${error.message}`, true);
+    setStatus(`Load failed: ${formatApiError(error)}`, true);
   } finally {
     updateAuthButtons();
   }

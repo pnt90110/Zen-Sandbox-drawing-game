@@ -4,7 +4,10 @@ const path = require("path");
 const express = require("express");
 const helmet = require("helmet");
 const { auth, requiresAuth } = require("express-openid-connect");
-const { MongoClient } = require("mongodb");
+const { createStateService } = require("./services/stateService");
+const { createApiController } = require("./controllers/apiController");
+const { createApiRouter } = require("./routes/apiRoutes");
+const { createStateRateLimiters } = require("./middleware/rateLimiters");
 
 const PORT = Number(process.env.PORT || 8000);
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
@@ -12,6 +15,35 @@ const OIDC_SCOPE = process.env.OIDC_SCOPE || "openid profile email";
 const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI || `${BASE_URL}/callback`;
 const OIDC_CORS_ORIGIN = process.env.OIDC_CORS_ORIGIN || "";
 const USE_SECURE_COOKIES = BASE_URL.startsWith("https://");
+
+function parseTrustProxy(value) {
+  if (value == null || value === "") {
+    return false;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  const asNumber = Number(normalized);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.floor(asNumber);
+  }
+
+  // Support subnet/IP CSV values accepted by Express.
+  if (normalized.includes(",")) {
+    return normalized
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+
+  return normalized;
+}
 
 const requiredEnv = [
   "SESSION_SECRET",
@@ -30,26 +62,23 @@ if (missing.length > 0) {
 const dbName = process.env.MONGODB_DB || "zen_sandbox";
 const collectionName = process.env.MONGODB_COLLECTION || "sandbox_states";
 
-let mongoClientPromise;
-function getMongoClient() {
-  if (!mongoClientPromise) {
-    mongoClientPromise = new MongoClient(process.env.MONGODB_URI)
-      .connect()
-      .catch((error) => {
-        // Reset cached promise so the next request can retry a fresh connection.
-        mongoClientPromise = undefined;
-        throw error;
-      });
-  }
-  return mongoClientPromise;
-}
-
-async function getStatesCollection() {
-  const client = await getMongoClient();
-  return client.db(dbName).collection(collectionName);
-}
+const stateService = createStateService({
+  mongoUri: process.env.MONGODB_URI,
+  dbName,
+  collectionName,
+});
+const apiController = createApiController({ stateService });
+const stateRateLimiters = createStateRateLimiters({
+  readWindowMs: process.env.STATE_READ_RATE_LIMIT_WINDOW_MS,
+  readMax: process.env.STATE_READ_RATE_LIMIT_MAX,
+  writeWindowMs: process.env.STATE_WRITE_RATE_LIMIT_WINDOW_MS,
+  writeMax: process.env.STATE_WRITE_RATE_LIMIT_MAX,
+});
 
 const app = express();
+const trustProxy = parseTrustProxy(process.env.EXPRESS_TRUST_PROXY);
+
+app.set("trust proxy", trustProxy);
 
 app.use(
   helmet({
@@ -108,110 +137,14 @@ app.use(
   })
 );
 
-app.get("/api/me", (req, res) => {
-  if (!req.oidc.isAuthenticated()) {
-    return res.status(401).json({ authenticated: false });
-  }
-
-  const claims = req.oidc.user || {};
-  res.json({
-    authenticated: true,
-    user: {
-      sub: claims.sub,
-      name: claims.name || claims.preferred_username || claims.email || "User",
-      email: claims.email || null,
-    },
-  });
-});
-
-function validateStatePayload(payload) {
-  if (!payload || typeof payload !== "object") {
-    return "State payload must be an object.";
-  }
-
-  if (typeof payload.simWidth !== "number" || typeof payload.simHeight !== "number") {
-    return "State payload is missing simWidth/simHeight.";
-  }
-
-  const encodedKeys = [
-    "cells",
-    "life",
-    "fireState",
-    "waterSideAttempts",
-    "waterSleepVersion",
-  ];
-
-  for (const key of encodedKeys) {
-    if (typeof payload[key] !== "string" || payload[key].length === 0) {
-      return `State payload is missing ${key}.`;
-    }
-  }
-
-  if (payload.activeBalls != null && !Array.isArray(payload.activeBalls)) {
-    return "activeBalls must be an array if provided.";
-  }
-
-  return null;
-}
-
-app.get("/api/state", requiresAuth(), async (req, res) => {
-  try {
-    const collection = await getStatesCollection();
-    const userSub = req.oidc.user.sub;
-
-    const doc = await collection.findOne(
-      { userSub },
-      { projection: { _id: 0, userSub: 0, updatedAt: 0 } }
-    );
-
-    if (!doc) {
-      return res.status(404).json({ message: "No saved state found yet." });
-    }
-
-    return res.json(doc);
-  } catch (error) {
-    console.error("Failed to load state:", error);
-    return res.status(500).json({ message: "Failed to load state." });
-  }
-});
-
-app.put("/api/state", requiresAuth(), async (req, res) => {
-  try {
-    const validationError = validateStatePayload(req.body);
-    if (validationError) {
-      return res.status(400).json({ message: validationError });
-    }
-
-    const collection = await getStatesCollection();
-    const userSub = req.oidc.user.sub;
-
-    const now = new Date();
-    await collection.updateOne(
-      { userSub },
-      {
-        $set: {
-          userSub,
-          version: Number(req.body.version || 1),
-          simWidth: Number(req.body.simWidth),
-          simHeight: Number(req.body.simHeight),
-          cells: req.body.cells,
-          life: req.body.life,
-          fireState: req.body.fireState,
-          waterSideAttempts: req.body.waterSideAttempts,
-          waterSleepVersion: req.body.waterSleepVersion,
-          activeBalls: Array.isArray(req.body.activeBalls) ? req.body.activeBalls : [],
-          updatedAt: now,
-        },
-      },
-      { upsert: true }
-    );
-
-    return res.json({ ok: true, savedAt: now.toISOString() });
-  } catch (error) {
-    console.error("Failed to save state:", error);
-    return res.status(500).json({ message: "Failed to save state." });
-  }
-});
+app.use(
+  "/api",
+  createApiRouter({
+    controller: apiController,
+    requiresAuth,
+    stateRateLimiters,
+  })
+);
 
 app.use(express.static(path.join(__dirname)));
 
@@ -219,16 +152,11 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 
-async function ensureIndexes() {
-  const collection = await getStatesCollection();
-  await collection.createIndex({ userSub: 1 }, { unique: true });
-}
-
 const mongoRetryMs = Number(process.env.MONGODB_RETRY_MS || 30000);
 
 async function initializeMongoIndexesWithRetry() {
   try {
-    await ensureIndexes();
+    await stateService.ensureIndexes();
     console.log("MongoDB connected and indexes are ready.");
   } catch (error) {
     console.error("MongoDB initialization failed; retrying:", error);
